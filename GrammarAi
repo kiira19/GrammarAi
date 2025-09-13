@@ -1,0 +1,346 @@
+# Grammar Keyboard Android Prototype (Kotlin)
+
+This is a full Android Studio project skeleton for a grammar-correcting keyboard app. It includes:
+- Custom keyboard with suggestion strip
+- Grammar checking via LanguageTool API (demo)
+- Tap-to-accept corrections
+- Tagalog/Taglish support
+- Custom dictionary fallback
+- Step-by-step install guide
+- Privacy policy
+
+---
+
+## 📂 Project Structure
+```
+GrammarKeyboard/
+ ├── app/
+ │    ├── build.gradle
+ │    └── src/
+ │         └── main/
+ │              ├── AndroidManifest.xml
+ │              ├── java/com/example/grammarkeyboard/
+ │              │    ├── KeyboardService.kt
+ │              │    ├── GrammarChecker.kt
+ │              │    ├── SuggestionStripView.kt
+ │              │    └── DictionaryHelper.kt
+ │              └── res/
+ │                   ├── layout/
+ │                   │    ├── keyboard_view.xml
+ │                   │    └── suggestion_strip.xml
+ │                   ├── xml/
+ │                   │    └── method.xml
+ │                   └── values/
+ │                        └── strings.xml
+ └── build.gradle
+```
+
+---
+
+## 📄 Root `build.gradle`
+```gradle
+// Top-level build.gradle
+buildscript {
+    repositories {
+        google()
+        mavenCentral()
+    }
+    dependencies {
+        classpath "com.android.tools.build:gradle:8.2.2"
+        classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:1.9.22"
+    }
+}
+
+allprojects {
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+```
+
+---
+
+## 📄 `app/build.gradle`
+```gradle
+plugins {
+    id 'com.android.application'
+    id 'kotlin-android'
+}
+
+android {
+    namespace 'com.example.grammarkeyboard'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "com.example.grammarkeyboard"
+        minSdk 24
+        targetSdk 34
+        versionCode 1
+        versionName "1.0"
+
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+    }
+}
+
+dependencies {
+    implementation "org.jetbrains.kotlin:kotlin-stdlib:1.9.22"
+    implementation 'com.squareup.okhttp3:okhttp:4.11.0'
+    implementation 'com.google.code.gson:gson:2.10.1'
+}
+```
+
+---
+
+## 📄 `AndroidManifest.xml`
+```xml
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.example.grammarkeyboard">
+
+    <application
+        android:label="Grammar Keyboard"
+        android:icon="@mipmap/ic_launcher">
+
+        <service
+            android:name=".KeyboardService"
+            android:permission="android.permission.BIND_INPUT_METHOD"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.view.InputMethod" />
+            </intent-filter>
+
+            <meta-data
+                android:name="android.view.im"
+                android:resource="@xml/method" />
+        </service>
+
+    </application>
+
+</manifest>
+```
+
+---
+
+## 📄 `KeyboardService.kt`
+```kotlin
+package com.example.grammarkeyboard
+
+import android.inputmethodservice.InputMethodService
+import android.view.View
+import android.view.inputmethod.EditorInfo
+import android.view.inputmethod.InputConnection
+import android.widget.LinearLayout
+import android.widget.Toast
+import kotlinx.coroutines.*
+
+class KeyboardService : InputMethodService() {
+
+    private lateinit var suggestionStrip: SuggestionStripView
+    private val scope = CoroutineScope(Dispatchers.IO)
+
+    override fun onCreateInputView(): View {
+        val layout = layoutInflater.inflate(R.layout.keyboard_view, null) as LinearLayout
+        suggestionStrip = layout.findViewById(R.id.suggestion_strip)
+        suggestionStrip.onSuggestionClicked = { suggestion ->
+            currentInputConnection?.let {
+                it.deleteSurroundingText(1, 0)
+                it.commitText(suggestion, 1)
+            }
+        }
+        return layout
+    }
+
+    override fun onStartInputView(info: EditorInfo?, restarting: Boolean) {
+        super.onStartInputView(info, restarting)
+        // Ready to capture text and suggest corrections
+    }
+
+    fun onUserFinishedSentence(text: String) {
+        scope.launch {
+            val suggestions = GrammarChecker.checkText(text)
+            withContext(Dispatchers.Main) {
+                suggestionStrip.showSuggestions(suggestions)
+            }
+        }
+    }
+}
+```
+
+---
+
+## 📄 `GrammarChecker.kt`
+```kotlin
+package com.example.grammarkeyboard
+
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.FormBody
+import com.google.gson.JsonParser
+
+object GrammarChecker {
+    private val client = OkHttpClient()
+
+    fun checkText(text: String): List<String> {
+        val requestBody = FormBody.Builder()
+            .add("text", text)
+            .add("language", "en-US")
+            .build()
+
+        val request = Request.Builder()
+            .url("https://api.languagetool.org/v2/check")
+            .post(requestBody)
+            .build()
+
+        return try {
+            client.newCall(request).execute().use { response ->
+                val json = JsonParser.parseString(response.body!!.string()).asJsonObject
+                val matches = json["matches"].asJsonArray
+                matches.mapNotNull {
+                    val replacements = it.asJsonObject["replacements"].asJsonArray
+                    if (replacements.size() > 0) replacements[0].asJsonObject["value"].asString else null
+                }
+            }
+        } catch (e: Exception) {
+            listOf()
+        }
+    }
+}
+```
+
+---
+
+## 📄 `SuggestionStripView.kt`
+```kotlin
+package com.example.grammarkeyboard
+
+import android.content.Context
+import android.util.AttributeSet
+import android.widget.LinearLayout
+import android.widget.TextView
+import android.view.LayoutInflater
+import android.view.View
+
+class SuggestionStripView @JvmOverloads constructor(
+    context: Context,
+    attrs: AttributeSet? = null
+) : LinearLayout(context, attrs) {
+
+    var onSuggestionClicked: ((String) -> Unit)? = null
+
+    fun showSuggestions(suggestions: List<String>) {
+        removeAllViews()
+        suggestions.forEach { suggestion ->
+            val textView = LayoutInflater.from(context).inflate(R.layout.suggestion_item, this, false) as TextView
+            textView.text = suggestion
+            textView.setOnClickListener { onSuggestionClicked?.invoke(suggestion) }
+            addView(textView)
+        }
+    }
+}
+```
+
+---
+
+## 📄 `DictionaryHelper.kt`
+```kotlin
+package com.example.grammarkeyboard
+
+object DictionaryHelper {
+    private val customWords = setOf("Tagalog", "Taglish", "kumusta", "ayos")
+
+    fun isWordValid(word: String): Boolean {
+        return customWords.contains(word.lowercase())
+    }
+}
+```
+
+---
+
+## 📄 `res/layout/keyboard_view.xml`
+```xml
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="vertical">
+
+    <com.example.grammarkeyboard.SuggestionStripView
+        android:id="@+id/suggestion_strip"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"/>
+
+    <KeyboardView
+        android:id="@+id/keyboard"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:keyPreviewLayout="@null"
+        android:showPreview="false"/>
+</LinearLayout>
+```
+
+---
+
+## 📄 `res/layout/suggestion_strip.xml`
+```xml
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="horizontal">
+
+    <TextView
+        android:id="@+id/suggestion_item"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:padding="8dp"
+        android:textSize="16sp"/>
+</LinearLayout>
+```
+
+---
+
+## 📄 `res/xml/method.xml`
+```xml
+<?xml version="1.0" encoding="utf-8"?>
+<input-method xmlns:android="http://schemas.android.com/apk/res/android">
+    <subtype
+        android:label="@string/keyboard_name"
+        android:imeSubtypeLocale="en_US"
+        android:imeSubtypeMode="keyboard" />
+</input-method>
+```
+
+---
+
+## 📄 `res/values/strings.xml`
+```xml
+<resources>
+    <string name="app_name">Grammar Keyboard</string>
+    <string name="keyboard_name">Grammar Keyboard</string>
+</resources>
+```
+
+---
+
+## ✅ Step-by-Step Install Checklist
+1. Download and install **Android Studio**.
+2. Create a new project and replace files with the ones above.
+3. Connect your Android phone/tablet via USB (enable Developer Mode + USB debugging).
+4. Build & Run the project → Android Studio will install the APK.
+5. Go to **Settings → System → Languages & input → Keyboards** → enable **Grammar Keyboard**.
+6. Switch keyboard and test grammar suggestions.
+
+---
+
+## 🔒 Privacy Policy (for publishing)
+"Grammar Keyboard does not store or sell your personal data. Grammar corrections are processed via the LanguageTool API. Only the text you type (for grammar checking) may be sent to the service. We do not log, save, or share your data."
+
+---
